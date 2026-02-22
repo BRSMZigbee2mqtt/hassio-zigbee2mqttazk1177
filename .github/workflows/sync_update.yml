@@ -1,0 +1,248 @@
+name: Sync Forks and Update JSON
+
+# Виконання щотижня (або змініть на зручний інтервал)  
+on:
+  schedule:
+    # Запускається щодня о 04:00 UTC
+    - cron: '0 4 * * *'
+  # Дозволяє ручний запуск з інтерфейсу GitHub
+  workflow_dispatch:
+
+jobs:
+  sync_and_update:
+    runs-on: ubuntu-latest
+
+    # Використовуйте змінну середовища для токена (потрібно додати Secret)
+    env:
+      GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+      
+    steps:
+      - name: Checkout repository
+        # Це клонує ваш форк в робоче середовище Actions
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          # Потрібен fetch-depth 0 для повної історії, якщо будете використовувати git commands
+          fetch-depth: 0
+
+      - name: Set Git User Identity
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "GitHub Actions Bot"
+
+      - name: Setup PowerShell
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x' # Або інша версія для сумісності з PowerShell
+
+      - name: PowerShell Logic for Sync and File Update
+        shell: pwsh
+        run: |
+          # =================================================================
+          # КОНФІГУРАЦІЯ
+          # =================================================================
+          $UPSTREAM_REPO = "https://github.com/zigbee2mqtt/hassio-zigbee2mqtt.git"
+          $FILES_TO_UPDATE = @("repository.json", "zigbee2mqtt/config.json") # ЗАМІНІТЬ НА ВАШІ ФАКТИЧНІ ІМЕНА
+          $OLD_TEXT = '"url": "https://github.com/zigbee2mqtt/hassio-zigbee2mqtt",' 
+          $NEW_TEXT = '"url": "https://github.com/BRSMZigbee2mqtt/hassio-zigbee2mqttazk1177",' 
+          $OLD_TEXT2 = "Home Assistant Add-on: Zigbee2MQTT"
+          $NEW_TEXT2 = "Zigbee2MQTT AZK 1177"
+          $OLD_TEXT3 = '"name": "Zigbee2MQTT",'
+          $NEW_TEXT3 = '"name": "Zigbee2MQTT AZK 1177",'
+
+
+          $COMMIT_MESSAGE = "Auto-sync with zigbee2mqtt, hard reset, and custom config updates"
+
+          # Файли, які потрібно зберегти від перезапису (ВСІ ВАШІ .yml ФАЙЛИ)
+          # Вкажіть тут усі файли, які є у папці .github/workflows
+          $WORKFLOW_FILE = ".github/workflows/sync_update.yml"
+
+          # Визначення поточної гілки
+          $currentBranch = (git rev-parse --abbrev-ref HEAD).Trim()
+          
+          # =================================================================
+          # 1. ЗАХИСТ (ЗБЕРЕЖЕННЯ ВМІСТУ В ЗМІННУ)
+          # =================================================================
+          Write-Host "--- 1. Збереження вмісту Workflow файлу ---" -ForegroundColor Yellow
+          
+          # Читаємо вміст файлу та зберігаємо його в змінній (якщо файл існує)
+          if (Test-Path $WORKFLOW_FILE) {
+              $WorkflowContent = Get-Content $WORKFLOW_FILE | Out-String
+              Write-Host "    - Вміст '$WORKFLOW_FILE' успішно збережено в пам'яті."
+          } else {
+              # Якщо файл зник після попереднього запуску, ми не можемо його відновити!
+              # В цьому випадку, ВИ МАЄТЕ ЙОГО СТВОРИТИ ПЕРЕД НАСТУПНИМ ЗАПУСКОМ.
+              Write-Error "УВАГА: Файл '$WORKFLOW_FILE' відсутній у робочому каталозі. Вам потрібно його відновити на GitHub перед наступним запуском!"
+              exit 1
+          }
+
+
+          # =================================================================
+          # 2. Скидання та Синхронізація (ЗНИЩЕННЯ ФАЙЛІВ З WORKFLOW)
+          # =================================================================
+          Write-Host "--- 2. Жорстке скидання та Force Push ---" -ForegroundColor Red
+          
+          git remote add upstream $UPSTREAM_REPO
+          git fetch upstream
+
+          # Жорстке скидання до стану upstream (тут файл Workflow зникає з локального каталогу)
+          git reset --hard "upstream/$currentBranch"
+
+          # =================================================================
+          # 2A. ОЧИЩЕННЯ WORKFLOWS ТА FORCE PUSH (ЗНИЩЕННЯ)
+          # =================================================================
+          Write-Host "--- 2А. Видалення всіх файлів Workflow з Git ---" -ForegroundColor Yellow
+          
+          # Видаляємо всі файли з директорії workflows з індексу Git
+          # Це додасть видалення інших файлів Actions до наступного коміту
+          git rm -r --ignore-unmatch --force ".github/workflows/*"
+
+          
+          # Примусова відправка (Force Push) чистої історії upstream на ваш форк
+          git push origin $currentBranch --force
+
+
+
+
+          # =================================================================
+          # 3. ВІДНОВЛЕННЯ (ЗАПИС ФАЙЛУ ЗІ ЗМІННОЇ)
+          # =================================================================
+          Write-Host "--- 3. Відновлення Workflow файлу ---" -ForegroundColor Yellow
+          
+          # Створюємо папку, якщо її видалено
+          New-Item -ItemType Directory -Force -Path (Split-Path $WORKFLOW_FILE)
+          
+          # Записуємо збережений вміст назад у файл
+          $WorkflowContent | Set-Content $WORKFLOW_FILE
+          Write-Host "    - Файл '$WORKFLOW_FILE' відновлено."
+
+          # =================================================================
+          # 4. Внесення та фіксація ВАШИХ КОНФІГУРАЦІЙНИХ ЗМІН (JSON та WORKFLOW)
+          # =================================================================
+          Write-Host "--- 4. Фіксація відновленого Workflow та оновлення JSON ---" -ForegroundColor Cyan
+          $ChangesMade = $false
+
+          # 4А. Фіксуємо відновлений файл Workflow
+          git add $WORKFLOW_FILE
+          $ChangesMade = $true
+
+          # 4Б. Оновлення та фіксація JSON (як раніше)
+          Write-Host "--- 4. Примусова відправка змін (Force Push) ---" -ForegroundColor Red
+          try {
+              # Використовуємо --force, щоб замінити історію вашого форка історією upstream
+              git push origin $currentBranch --force
+              Write-Host "Успішно примусово відправлено. Ваш форк на GitHub оновлено." -ForegroundColor Green
+          } catch {
+              Write-Error "Помилка під час Force Push. Перевірте PAT."
+              exit 1
+          }
+          
+          # =================================================================
+          # 5. Внесення та фіксація ВАШИХ КОНФІГУРАЦІЙНИХ ЗМІН (JSON)
+          # =================================================================
+          Write-Host "--- 5. Внесення змін у файли JSON... ---"
+          $ChangesMade = $false
+          # ... (логіка заміни тексту залишається такою ж)
+          foreach ($File in $FILES_TO_UPDATE) {
+              $FilePath = "./$File"
+
+              if (Test-Path $FilePath) {
+                  $Content = Get-Content $FilePath | Out-String
+                  $NewContent = $Content -replace [regex]::Escape($OLD_TEXT), $NEW_TEXT
+                  $NewContent = $NewContent -replace [regex]::Escape($OLD_TEXT2), $NEW_TEXT2
+                  $NewContent = $NewContent -replace [regex]::Escape($OLD_TEXT3), $NEW_TEXT3
+                  if ($Content -ne $NewContent) {
+                      $NewContent | Set-Content $FilePath
+                      Write-Host "    - Оновлено: $File" -ForegroundColor DarkGreen
+                      $ChangesMade = $true
+                  }
+              }
+          }
+          
+          # 6. Фіксація та Відправка (тільки якщо були зміни в JSON)
+          if ($ChangesMade) {
+              Write-Host "--- 6. Фіксація (Commit) та Відправка (Push) нових JSON-змін... ---" -ForegroundColor Cyan
+              try {
+                  git add $FILES_TO_UPDATE
+                  git commit -m $COMMIT_MESSAGE
+                  # Тут вже звичайний push, бо commit зафіксовано поверх force push
+                  git push origin $currentBranch --force
+                  
+                  Write-Host "Успішно зафіксовано та відправлено кастомні зміни." -ForegroundColor Green
+              } catch {
+                  Write-Error "Помилка Git під час фіксації/відправки кастомних змін: $($_.Exception.Message)"
+                  exit 1
+              }
+          } else {
+              Write-Host "Немає змін у JSON-файлах, які потрібно фіксувати." -ForegroundColor Yellow
+          }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
